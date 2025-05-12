@@ -3,8 +3,9 @@
 
 CC      := gcc-4.2
 CFLAGS  := -Os
-CP      := cp -P
+CP      := cp -p
 MKDIR_P := mkdir -p
+RM      := rm -f
 
 prefix     := .
 libdir     := $(prefix)/lib
@@ -60,7 +61,8 @@ clean :
 help :
 	@echo ''
 	@echo 'This library implements sendfile(2), which Apple managed to leave out of Mac OS'
-	@echo 'prior to version 10.5, despite listing it in the system headers (incorrectly).'
+	@echo 'until version 10.5, despite listing it in the system headers (with an incorrect'
+	@echo 'prototype).'
 	@echo ''
 	@echo 'To install software that requires sendfile(2) on Mac OS 10.3.9/10.4.x, install'
 	@echo 'this library (plus its header file and manpage).  Where everything goes is con-'
