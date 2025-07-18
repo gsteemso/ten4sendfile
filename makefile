@@ -74,7 +74,7 @@ help :
 	@echo '    man2dir         $${mandir}/man2'
 	@echo ''
 	@echo 'Simply enter `make install` at the command prompt.  Other Make targets are the'
-	@echo "default (builds the library but doesn't install it); `clean` (deletes the built"
+	@echo "default (builds the library but doesn't install it); \`clean\` (deletes the built"
 	@echo 'library from the build directory); and `uninstall` (erases all installed files,'
 	@echo 'plus any empty directories left by their removal).'
 	@echo ''
