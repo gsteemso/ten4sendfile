@@ -1,8 +1,8 @@
 /* ten4sendfile:  Implements sendfile(), as missing from Mac OS 10.4.         *
  *                                                                            *
- * Sendfile() appears in the Mac OS 10.4 system headers, but an actual imple- *
- * mentation was omitted (as was the manpage).  This little library rectifies *
- * the former oversight.                                                      */
+ * Sendfile() appears in the Mac OS 10.4 system headers, but was not actually *
+ * implemented.  (No manpage for it was provided, either).  This tiny library *
+ * rectifies the former oversight.                                            */
 
 /* Derived from the Leopard manpage:                                          *
  *                                                                            *
@@ -113,7 +113,10 @@ spool_iovv(int   s,  /* A streaming socket descriptor.                        */
            v_st  = 0,                   /* running "vector subtotal"          */
            v_t   = check_iovv(*v, *n);  /* "vector total"                     */
       int  v_i   = 0;                   /* "vector index"                     */
-  if (v_t < 0) return -1;               /* check_iovv() set {errno}; {*l} += 0*/
+  if (v_t < 0)                          /* check_iovv() already set {errno}   */
+  { l = 0;
+    return -1;
+  }
   while (v_st < v_t)
   { r = writev(s, *v, *n);
     if (r < 0)
