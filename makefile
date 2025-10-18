@@ -1,7 +1,7 @@
 # Makefile for ten4sendfile
-# written 2025-Jan-11 by gsteemso
+# written 2025-Jan-11, last edited 2025-Oct-17 by gsteemso
 
-CC      := gcc-4.2
+CC      := cc
 CFLAGS  := -Os
 CP      := cp -p
 MKDIR_P := mkdir -p
@@ -18,7 +18,7 @@ lib_header := ten4sendfile.h
 manpage    := sendfile.2.gz
 
 built_lib  := libsendfile.dylib
-inst_hdr   := sendfile.h
+inst_hdr   := sys/socket.h
 
 installed_lib := $(libdir)/$(built_lib)
 installed_hdr := $(includedir)/$(inst_hdr)
@@ -35,7 +35,7 @@ $(built_lib) : $(lib_header) $(lib_source)
 	$(CC) $(CFLAGS) $(dylib_args) $(Tiger_bin_args) -o $(built_lib) $(lib_source)
 
 install : $(built_lib) $(lib_header) $(manpage)
-	@$(MKDIR_P) $(includedir)
+	@$(MKDIR_P) $(includedir)/sys
 	@$(MKDIR_P) $(libdir)
 	@$(MKDIR_P) $(man2dir)
 	$(CP) $(built_lib) $(installed_lib)
