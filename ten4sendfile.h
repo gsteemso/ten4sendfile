@@ -11,7 +11,7 @@
 
 /* This header file is meant to be installed, as <sys/socket.h>, to somewhere *
  * that gets searched for system headers before /usr/include.                 */
-#include_next
+#include_next <sys/socket.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 
