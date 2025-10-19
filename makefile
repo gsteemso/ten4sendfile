@@ -1,5 +1,5 @@
-# Makefile for ten4sendfile
-# written 2025-Jan-11, last edited 2025-Oct-17 by gsteemso
+# Makefile for ten4sendfile.
+# Written 2025-Jan-11, last edited 2025-Oct-18 by gsteemso.
 
 CC      := cc
 CFLAGS  := -Os
@@ -27,12 +27,11 @@ installed     := $(installed_lib) $(installed_hdr) $(installed_man)
 
 dylib_vers_args := -compatibility_version 1.0.0 -current_version 1.0.0
 dylib_args := -dynamiclib -install_name $(installed_lib) -headerpad_max_install_names $(dylib_vers_args)
-Tiger_bin_args := -undefined dynamic_lookup
 
 export MACOSX_DEPLOYMENT_TARGET := 10.3
 
 $(built_lib) : $(lib_header) $(lib_source)
-	$(CC) $(CFLAGS) $(dylib_args) $(Tiger_bin_args) -o $(built_lib) $(lib_source)
+	$(CC) $(CFLAGS) $(dylib_args) -o $(built_lib) $(lib_source)
 
 install : $(built_lib) $(lib_header) $(manpage)
 	@$(MKDIR_P) $(includedir)/sys
@@ -61,28 +60,27 @@ clean :
 help :
 	@echo ''
 	@echo 'This library implements sendfile(2), which Apple managed to leave out of Mac OS'
-	@echo 'until version 10.5, despite listing it in the system headers (with an incorrect'
-	@echo 'prototype).'
+	@echo 'until release 10.5, despite it appearing in earlier system headers (albeit with'
+	@echo 'an incorrect prototype).  To allow software builds requiring sendfile(2) on Mac'
+	@echo 'OS 10.3.9 or 10.4.x, install this library and its header file (& manpage).  The'
+	@echo 'installed header is named "sys/socket.h", and it incorporates the stock version'
+	@echo 'thereof as part of its normal operations.'
 	@echo ''
-	@echo 'To install software that requires sendfile(2) on Mac OS 10.3.9/10.4.x, install'
-	@echo 'this library (plus its header file and manpage).  Where everything goes is con-'
-	@echo 'trolled by these command-line variables:'
-	@echo ''
+	@echo 'Where everything gets put depends on these command-line variables:'
 	@echo '    Variable        Default Setting'
+	@echo '   ----------      -----------------'
 	@echo '    prefix          . (the current directory)'
 	@echo '    libdir          $${prefix}/lib'
 	@echo '    includedir      $${prefix}/include'
 	@echo '    mandir          $${prefix}/share/man'
 	@echo '    man2dir         $${mandir}/man2'
 	@echo ''
-	@echo 'Simply enter `make install` at the command prompt.  Other Make targets are the'
-	@echo "default (builds the library but doesn't install it); \`clean\` (deletes the built"
-	@echo 'library from the build directory); and `uninstall` (erases all installed files,'
-	@echo 'plus any empty directories left by their removal).'
+	@echo 'Just command `make install`, including any variables you need to change.  Other'
+	@echo 'possible Make targets are the default (which builds the library, not installing'
+	@echo 'it); `clean` (which deletes the built but not installed library); & `uninstall`'
+	@echo '(which deletes all installed files, plus any empty directories they leave).  To'
+	@echo 'build other software, you then add whichever of "-isystem $${includedir}" and/or'
+	@echo '"-L$${libdir} -lsendfile" should apply to the relevant compiler command line(s).'
 	@echo ''
-	@echo 'Software you want to install must add "-I$${includedir} -L$${libdir} -lsendfile"'
-	@echo 'to its compiler command line(s), and replace "#include <sys/socket.h>" with'
-	@echo '"#include "sendfile.h"" in any files where sendfile(2) is used.  "sendfile.h"'
-	@echo 'safely includes <sys/socket.h> without interfering with itself.'
 
 .PHONY : clean help install uninstall
