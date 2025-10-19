@@ -17,12 +17,12 @@
  *     either).  {offset} is of type {off_t}, a 64-bit signed integer.        *
  * {len} gives the count of file octets to send (if zero, all of them through *
  *     end-of-file), & returns the total count of octets actually sent.  This *
- *     is an {off_t} passed by reference.                                     *
+ *     is another {off_t}, passed by reference.                               *
  * {hdtr}, when present, points to a structure describing two variable-length *
  *     arrays of {struct iovec} (see writev(2) and uio.h).  These arrays hold *
  *     header and/or trailer data meant to bookend the file data.  The Mac OS *
- *     documentation does not explain this, but real-world examples show that *
- *     {hdtr} data should count towards the number of octets transmitted.     *
+ *     documentation does not explain as much, but real-world examples reveal *
+ *     that {hdtr} data should count towards the number of octets transmitted.*
  * {flags} is a reserved {int}.                                               *
  *                                                                            *
  * sendfile() returns 0 on success, or -1 (with {errno} set appropriately) on *
@@ -52,129 +52,103 @@
 #include <time.h>
 #include <unistd.h>
 
-#define BUILDING_TEN4SENDFILE 1
+#define TEN4SENDFILE 1
 #include "ten4sendfile.h"
 
 typedef struct stat     Stat;
 typedef struct timespec Timespec;
 
 const Timespec a_third     = {0, 16666667};  /* 1/60 second = one "third".    */
-const uint32_t MAX_RETRIES = 20;
+const uint32_t MAX_RETRIES = 50;
 
 
 /* check_iovv():                                                              *
  * For simultaneously sanity-checking and getting the total size of data in a *
  * variable-length {IOVec} array.  When the array, or any one of its members' *
  * base pointers, is NULL it sets {errno} to EFAULT and returns -1.  When the *
- * array size or the block size of any member is not positive it sets {errno} *
- * to EINVAL and returns -1.  In all other cases, it returns the total number *
- * of octets delineated by the array.                                         */
+ * array size or the block size of any member is negative or zero, {errno} is *
+ * set to EINVAL and it returns -1.  In all other cases, it returns the total *
+ * number of octets delineated by the array.  The return value is a {ssize_t},*
+ * which is ultimately defined as a {long}, thus is either 32 or 64 bits wide *
+ * depending on whether LP64 mode is active.                                  */
 ssize_t
-check_iovv(   IOVec *vary,  /* A variable-length array of {IOVec}.            */
-           uint32_t  n_el   /* The number of elements in the array.           */
+check_iovv(IOVec varray[],  /* A variable-length array of {IOVec}.            */
+             int n_el       /* The number of elements in the array.           */
           )
-{  ssize_t sum = 0;
-  uint32_t i   = 0;
-  if (vary == NULL) { errno = EFAULT;  return -1; }
-  if (n_el == 0)    { errno = EINVAL;  return -1; }
-  for (; i < n_el; i++)
-  { if (vary[i].iov_base == NULL) { errno = EFAULT;  return -1; }
-    if (vary[i].iov_len  <= 0)    { errno = EINVAL;  return -1; }
-    sum += vary[i].iov_len;
+{ ssize_t sum = 0;
+  if (varray == NULL) { errno = EFAULT;  return -1; }
+  if (  n_el <= 0)    { errno = EINVAL;  return -1; }
+  for (int i = 0; i < n_el; i++)
+  { if (varray[i].iov_base == NULL) { errno = EFAULT;  return -1; }
+    if (varray[i].iov_len  <= 0)    { errno = EINVAL;  return -1; }
+    sum += varray[i].iov_len;
   }
-  if (sum == 0) { errno = EINVAL;  return -1; }
-  return sum;
-} /* end of check_iovv() */
+  return sum;  /* Guaranteed to be greater than zero.                         */
+} /* end of check_iovv()                                                      */
 
 
+/* spool_iovv():                                                              *
+ * For streaming a variable-length IOVec array to a socket.  If the streaming *
+ * gets interrupted, it adjusts the IOVec array to still accurately represent *
+ * the data not yet sent.                                                     */
 int
-spool_iovv(int   sock,  /* A streaming socket descriptor.                     */
-         IOVec **vary,  /* A variable-length array of {IOVec}                 */
-      uint32_t  *n_el,  /* The number of elements in the array.               */
-         off_t  *lngth  /* 64-bit {int}.  Returns the number octets written.  */
+spool_iovv(  int   sd,    /* A streaming socket descriptor.                   */
+           IOVec **iovv,  /* Variable-length {IOVec} vector, by reference.    */
+             int  *n_el,  /* Number of elements in the vector, by reference.  */
+           off_t  *len    /* Signed {int64} ref for number of octets written. */
           )
-{   IOVec *v_bup  = *vary;              /* "vector backup"                    */
-    IOVec  el_bup = *vary[0];           /* "element backup"                   */
-  ssize_t  rslt   = 0,                  /* "result"                           */
-           v_subt = 0,                  /* running "vector subtotal"          */
-           v_tot  = check_iovv(*vary, *n_el); /* "vector total"               */
-      int  v_idx  = 0;                  /* "vector index"                     */
-  if (v_tot < 0)                        /* check_iovv() already set {errno}   */
-  { lngth = 0;
-    return -1;
-  }
-  while (v_subt < v_tot)
-  { rslt = writev(sock, *vary, *n_el);
-    if (rslt < 0)
-    /* The possible errors (given we've already done validation) are:         *
-     * EAGAIN  The write to {sock} would have blocked.  No data was written.  *
-     * EBADF   {sock} is not a valid descriptor.  OK as is.                   *
-     * EDESTADDRREQ  {sock}'s lost its destination.  Map to ENOTCONN.         *
-     * EDQUOT  Only for disk writes.  Should never happen; map to ENOTSOCK.   *
-     * EFAULT  {hdtr->headers} or something within it is invalid.  OK as is.  *
-     * EFBIG   Only if {sock} was file.  Should never happen; map to ENOTSOCK.*
-     * EINTR   A signal pre-empted writev.  OK as is.                         *
-     * EINVAL  {hdtr->hdr_cnt} > sys max or {v_subt} overflowed.  OK as is.   *
-     * EIO     There was a problem writing to {sock}.  OK as is.              *
-     * ENOBUFS Ran out of buffers writing to {sock}.  Map to EIO.             *
-     * ENOSPC  Only for disk writes.  Should never happen; map to ENOTSOCK.   *
-     * EPIPE   {sock} hasn't got a peer streaming socket.  Map to ENOTCONN.   */
-    { switch (errno)
-      { case EINTR:  /*  4 */  case EIO:    /*  5 */  case EBADF:  /*  9 */
-        case EFAULT: /* 14 */  case EINVAL: /* 22 */  case EAGAIN: /* 35 */
-        /* We may return these same values, and for these same reasons.       */
-          break;
-        case EFBIG:  /* 27 */  case ENOSPC: /* 28 */  case EDQUOT: /* 69 */
-        /* Only possible if writing to a disk, not a socket.                  */
-          errno = ENOTSOCK;  break;
-        case EPIPE:  /* 32 */  case EDESTADDRREQ: /* 39 */
-        /* Only possible if the socket was disconnected.                      */
-          errno = ENOTCONN;  break;
-        default:  /* including ENOBUFS (55) */
+{  ssize_t result    = 0,
+           left_2_go = check_iovv(*iovv, *n_el); /* Amount left to stream.    */
+    size_t _result;        /* For comparisons to unsigned size_t values.      */
+  uint32_t retries   = 0;  /* For pre-emptions and interruptions.             */
+  *len = 0;
+  if (left_2_go < 0) return -1;  /* check_iovv() already set {errno} to suit. */
+  while (left_2_go > 0)  /* Note an initial left_2_go of 0 will bypass this.  */
+  { result = writev(sd, *iovv, *n_el);
+    /* Function prototype here is ssize_t writev(int s, const IOVec a, int n).
+       writev() does all our actual work but doesn't adjust the IOVec data to
+       reflect partial progress.                                              */
+    if (result < 0) /* writev() suffered an error.                            */
+    { switch (errno)  /* Possible errors (given we've already validated) are: */
+      { case EAGAIN:
+        if (retries++ < MAX_RETRIES)  /* Usually transient; sleep & retry.    */
+        { if (nanosleep(&a_third, NULL) && errno == EINTR) break;
+          /* The other potential nanosleep() errors ought to be impossible.   */
+          continue;  /* In this case, no data was written; just pick up & go. */
+        } else break;  /* All those retries still weren't enough.  Give up.   */
+        case EBADF:   case EFAULT:   case EINTR:   case EINVAL:   case EIO:
+          break; /* We may return these same values, & for these same reasons.*/
+        case EDESTADDRREQ:   case EPIPE:
+          errno = ENOTCONN;  break;  /* Only possible if socket disconnected. */
+        case EDQUOT:   case EFBIG:   case ENOSPC:
+          errno = ENOTSOCK;  break;  /* Only if writing to disk, not socket.  */
+        default:  /* including case ENOBUFS                                   */
           errno = EIO;  break;
-      } /* end switch statement */
-      *lngth += v_subt;  /* Record the progress thus far.                     */
-      /* Put the vector data back the way we got it, just in case:            */
-      if (*vary != v_bup) *vary = v_bup;
-      if (((*vary)[v_idx].iov_base != el_bup.iov_base)
-          && ((*vary)[v_idx].iov_len != el_bup.iov_len)) *vary[v_idx] = el_bup;
-      return -1;
-    } /* end error handling after writev()                                    */
-    v_subt += rslt;
-    if (rslt && (v_subt != v_tot))
-    /* We didn't get it all, presumably due to being pre-empted / interrupted *
-     * in some manner.  Adjust the relevant IOVec and the main vector pointer *
-     * before we loop to try again.                                           */
-    { /* {rslt} will keep our running total of preceding elements' sizes.     */
-        size_t d = 0;  /* Difference between running subtotal sent & {rslt}.  */
-      uint32_t i = 0;  /* Which element we're looking at.                     */
-      /* Restore the vector data if we edited it:                             */
-      if (*vary != v_bup) *vary = v_bup;
-      if (((*vary)[v_idx].iov_base != el_bup.iov_base)
-          && ((*vary)[v_idx].iov_len != el_bup.iov_len)) *vary[v_idx] = el_bup;
-      for (rslt = 0; (rslt < v_subt) && (i < *n_el);)
-      { d = v_subt - rslt;
-        if ((*vary)[i].iov_len > d) /* We have found our target block.        */
-        { v_idx = i;                /* Record which block that is.            */
-          rslt += d;                /* Bring {rslt} equal with {v_subt}.      */
-          el_bup = *vary[i];        /* Back up the block's state.             */
-          (*vary)[i].iov_len -= d;  /* Record the length of unmoved data.     */
-          (*vary)[i].iov_base += d; /* Point to start of unmoved data.  (GNU) */
-          if (i > 0)                /* Have we gone past the first block?     */
-          { v_bup = *vary;          /* Back up the master pointer.            */
-            *vary += i;             /* Magical master-pointer arithmetic.     */
-          }
-        } else rslt += (*vary)[i++].iov_len;  /* Advance both {rslt} and {i}. */
-      } /* end of "crawling the vector" for loop                              */
-    } /* end of "we didn't get it all" block                                  */
-  } /* end of "streaming the vector data" while loop                          */
-  *lngth += v_subt;  /* Record that we streamed this much data.               */
-  /* Put the vector data back the way we got it, just in case:                */
-  if (*vary != v_bup) *vary = v_bup;
-  if (((*vary)[v_idx].iov_base != el_bup.iov_base)
-      && ((*vary)[v_idx].iov_len != el_bup.iov_len)) *vary[v_idx] = el_bup;
+      } /* end of switch statement                                            */
+      return -1;  /* Safe; args were adjusted at end of prior loop iteration. */
+    } /* end writev() error handling                                          */
+    if (result)  /* We moved some data!  Yay!                                 */
+    { *len += result;  /* Track how much we've moved in total.                */
+      left_2_go -= result;  /* Track how far is left to go.                   */
+      if (left_2_go > 0)
+      /* We didn't get it all, presumably due to being pre-empted/interrupted
+         in some manner.  Adjust the IOVec array before we loop to try again. */
+      { _result = (size_t) result;
+        while ((**iovv).iov_len <= _result)  /* Can advance to next IOVec.    */
+        { _result -= (**iovv).iov_len;
+          (*iovv)++;       /* This should add sizeof(IOVec) to the pointer.   */
+          (*n_el)--;
+          if (*n_el < 1) { errno = EINVAL;  return -1; }  /* No more IOVecs?! */
+        } /* end of the "inching up the vector" while loop                    */
+        if ((_result) && ((**iovv).iov_len > _result))  /* IOVec partly sent. */
+        { (**iovv).iov_len -= _result;  /* Record length of the unmoved data, */
+          (**iovv).iov_base += _result;  /* and its beginning.                */
+        }
+      } /* end of the "we didn't get it all" block                            */
+    } /* end of the "we got a result" block                                   */
+  } /* end of the "there's still data left to stream" while loop              */
   return 0;
-} /* end of spool_iovv() */
+} /* end of spool_iovv()                                                      */
 
 
 /* stubborn_send():                                                           *
@@ -182,145 +156,142 @@ spool_iovv(int   sock,  /* A streaming socket descriptor.                     */
  * Returns 0 on success, and -1 (with errno set appropriately) otherwise.     */
 int
 stubborn_send(  char *bufr,  /* Data to send.                                 */
-              size_t *b_sz,  /* In:  Number of octets to send.                *
+             ssize_t *b_sz,  /* In:  Number of octets to send.                *
                               * Out:  # octets sent (on error will be fewer). */
-                 int  sock   /* Descriptor of the socket to send to.          */
+                 int  sd     /* Descriptor of the socket to send to.          */
              )
 {     char *buf_index  = bufr;   /* Read pointer into the input buffer.       */
-    size_t  cumulative = 0;      /* How much has been moved overall.          */
-    size_t  to_be_sent = *b_sz;  /* How much to try to send per call.         */
-   ssize_t  sent_count;          /* How much actually got sent per call.      */
+   ssize_t  cumulative = 0,      /* How much has been moved overall.          */
+            to_send    = *b_sz,  /* How much to try to send per call.         */
+            result;              /* How much actually got sent per call.      */
   uint32_t  retries    = 0;      /* How many times we have retried sending.   */
   /* Sanity checks:                                                           */
-  if (bufr == NULL) { errno = EINVAL; return -1; }
-  if (to_be_sent == 0) return 0;
+  if (bufr == NULL) { errno = EINVAL;  return -1; }
+  if (to_send == 0) return 0;
 
   do
-  { sent_count = send(sock, buf_index, to_be_sent, 0);
-    if (sent_count < 0)
+  { result = send(sd, buf_index, to_send, 0);
+    if (result < 0)
     { if (errno == EACCES || errno == EHOSTUNREACH)
       { /* Per the specs, we can't validly return either of those.            */
-        errno = ENOTCONN;
-        *b_sz = cumulative;
-        return -1;
-      } else if (errno == EAGAIN || errno == ENOBUFS)
-      { /* These errors are usually transient.  Retry.                        */
-        if (retries++ < MAX_RETRIES)
-        { if (nanosleep(&a_third, NULL) && errno == EINTR)
-          { *b_sz = cumulative;
-            return -1;
-          }
-          continue;
+        errno = ENOTCONN;  *b_sz = cumulative;  return -1;
+      } else if (errno == EAGAIN || errno == ENOBUFS)  /* Usually transient.  */
+      { if (retries++ < MAX_RETRIES)
+        { if (nanosleep(&a_third, NULL) && errno == EINTR)  /* Interrupted;   */
+          { *b_sz = cumulative;  return -1; }     /* is the caller's problem. */
+          continue;  /* Retry.                                                */
         } else  /* All those retries still weren't enough.  Give up.          */
-        { errno = EAGAIN;
-          *b_sz = cumulative;
-          return -1;
-        }
-      } else if (errno == EMSGSIZE)        /* Sent too much at once.          */
-      { to_be_sent = to_be_sent * 3 >> 2;  /* Try a value 3/4 as big.         */
+        { errno = EAGAIN;  *b_sz = cumulative;  return -1; }
+      } else if (errno == EMSGSIZE)  /* Tried to send too much at once.       */
+      { if (to_send > 1500) to_send = 1500;  /* Try an Ethernet payload size. */
+        else to_send = to_send * 3 >> 2;  /* Try a value 3/4 as big.          */
         continue;
       } else  /* Other errors are fatal, but do have safe errno values.       */
-      { *b_sz = cumulative;
-        return -1;
-    } }
+      { *b_sz = cumulative;  return -1; }
+    }
     /* If we got this far, send() didn't error out on us.  Yay!               */
-    cumulative += sent_count;
+    if (result == 0) break;  /* We must be done, regardless of measurements.  */
+    cumulative += result;
     if (cumulative < *b_sz)
     { buf_index = &(bufr[cumulative]);
       /* Don't try to send more than we have available!                       */
-      if ((*b_sz - cumulative) < to_be_sent) to_be_sent = *b_sz - cumulative;
+      if ((*b_sz - cumulative) < to_send) to_send = *b_sz - cumulative;
     }
   } while (cumulative < *b_sz);
   *b_sz = cumulative;
   return 0;
-} /* end of stubborn_send() */
+} /* end of stubborn_send()                                                   */
 
 
 int
 sendfile (int  fd,      /* Descriptor for the file to send.                   */
           int  sd,      /* Descriptor for the socket to send to.              */
-        off_t  offset,  /* Index of the first file octet to send.             */
+        off_t  offset,  /* {int64_t}.  Index of the first file octet to send. */
         off_t *len,     /* In:  Number of octets to read from the file.       *
                          * Out:  Total number of octets written (headers,     *
                                  file, and trailers combined).                */
       Sf_HdTr *hdtr,    /* Optional header and/or trailer data.               */
           int  flags    /* Reserved.  Return an error if nonzero.             */
          )
-{ const uint32_t Buf_Sz = 1400;  /* Buffer size that should fit a net packet. */
-  const uint32_t True   = 1;
-  const uint32_t False  = 0;
-
-       char buffer[Buf_Sz];
-    ssize_t buf_ptr    = 0;      /* {long}.  Index (data-end + 1) in buffer.  */
-     size_t positive_value;      /* For sizes that are definitely unsigned.   */
-      off_t infile_ptr;          /* {uint64_t}.  Input file's file pointer.   */
-      off_t cumulative = 0;      /* {uint64_t}.  Net number of octets sent.   */
-   uint32_t done_flag  = False,  /* For loop control.                         */
-            temp;                /* For one-off uses.                         */
-  socklen_t s_len;               /* int-sized; for one-off uses.              */
-        int result;              /* For system calls.                         */
-       Stat stats;               /* For the stat() calls.                     */
+{ const int BUF_SZ     = 8192;  /* Buffer size to suit a disk read.           */
+       Stat stats;              /* For the stat() calls.                      */
+       char buffer[BUF_SZ];     /* The actual buffer.                         */
+      off_t len_2_read,         /* How much data to read from the file.       */
+            infile_ptr,         /* Track the input-file file pointer.         */
+            cumulative = 0;     /* Net number of octets sent.                 */
+    ssize_t buf_ptr    = 0;     /* {long}.  Buffer index (end-of-data + 1).   */
+   uint32_t retries;            /* How many times we have retried sending.    */
+  socklen_t s_len;              /* {uint32_t}.  For the getsockinfo call.     */
+        int result;             /* For subroutine & system calls.             */
   /* Sanity-check the arguments.                                              */
   if (len == NULL) { errno = EINVAL;  return -1; }
-  *len = 0;
+  len_2_read = *len;
+  *len = 0;  /* This is the correct value for all the error returns below.    */
   if (offset < 0 || flags != 0) { errno = EINVAL;  return -1; }
+
   /* Sanity-check the file descriptor.                                        */
   if (fstat(fd, &stats)) return -1;  /* All 3 possible errnos are OK.         */
-  if ((stats.st_mode & S_IFMT) != S_IFREG) { errno = ENOTSUP;  return -1; }
-  if (offset > stats.st_size) return 0;
-                         /* Finished without having to do anything!  Awesome. */
+  if ((stats.st_mode & S_IFMT) != S_IFREG)  /* Not a regular file.  Fail.     */
+  { errno = ENOTSUP; return -1; }
+  if (offset > stats.st_size) len_2_read = 0;  /* So we can check {sd} too.   */
+
   /* Sanity-check the socket descriptor, insofar as is practical.             */
   if (fstat(sd, &stats)) return -1;  /* All 3 possible errnos are OK.         */
-  if ((stats.st_mode & S_IFMT) != S_IFSOCK) { errno = ENOTSOCK;  return -1; }
-  s_len = sizeof(temp);
-  if (getsockopt(sd, SOL_SOCKET, SO_TYPE, &temp, &s_len))
-  /* The possible errors are:                                                 *
-   * EBADF   {sd} is not a valid descriptor.  OK as is.                       *
-   * EDOM    Some parameter is outside its acceptable range.  Map to EINVAL.  *
-   * EFAULT  temp or s_len is outside our address space.  OK as is.           *
-   * ENOPROTOOPT  Inapplicable and should never be.  Map to EINVAL.           *
-   * ENOTSOCK     {sd} is not a socket.  OK as is.                            */
-  { if ((errno == EDOM /*33*/) || (errno == ENOPROTOOPT /*42*/)) errno = EINVAL;
+  if ((stats.st_mode & S_IFMT) != S_IFSOCK)  /* Not a socket.  Fail.          */
+  { errno = ENOTSOCK;  return -1; }
+  s_len = sizeof(result);
+  if (getsockopt(sd, SOL_SOCKET, SO_TYPE, &result, &s_len)) /* Got an error.  */
+  { /* All possible errors are OK as is, except these two:                    */
+    if ((errno == EDOM) || (errno == ENOPROTOOPT)) { errno = EINVAL; }
     return -1;
   }
-  if (temp != SOCK_STREAM) { errno = ENOTSOCK;  return -1; }
+  if (result != SOCK_STREAM) { errno = ENOTSOCK;  return -1; }
+
   /* Seek file to correct pos'n.  Do this now so can die early if it fails.   */
   infile_ptr = lseek(fd, offset, SEEK_SET);
-  /* If this errored, infile_ptr (= -1) will never equal offset (> 0).        */
+  /* If this errored, infile_ptr (= -1) will never equal offset (>= 0).  Even
+     if it thinks it succeeded, if the two differ we still want to bail out.  */
   if (infile_ptr != offset) { errno = EIO;  return -1; }
 
   /* Spool any headers to the socket:                                         */
-  if (hdtr != NULL && hdtr->headers != NULL && hdtr->hdr_cnt > 0)
-    temp = (uint32_t)(hdtr->hdr_cnt);             /* This is UNSIGNED dammit. */
-    if (spool_iovv(sd, &(hdtr->headers), &temp, len))
-      return -1;
-
-  /* Spool the file via the buffer to the socket:                             */
-  while (done_flag == False)
-  { temp = 0;
-Buf_Fill:
-    buf_ptr = read(fd, &buffer, Buf_Sz);
-    if (buf_ptr < 0)
-    { if (errno == EINTR || errno == EAGAIN)            /* Usually temporary. */
-      { if (temp++ < MAX_RETRIES) goto Buf_Fill;        /* Try again.         */
-        else { *len += cumulative;  return -1; }        /* Give up.           */
-      }
-      else
-      { if (errno == EINVAL) errno = EIO;               /* Can't EINVAL here. */
-        *len += cumulative;  return -1;
-      }
-    } else if (buf_ptr > 0)  /* Got data to send.                             */
-    { positive_value = (size_t)buf_ptr;
-      result         = stubborn_send(buffer, &positive_value, sd);
-      cumulative    += buf_ptr;
-      if (result == -1) { *len += cumulative;  return -1; } /* All errors OK. */
-    } else done_flag = True;                            /* Zero, have hit EOF.*/
+  if (hdtr && (hdtr->headers != NULL || hdtr->hdr_cnt != 0))
+  { IOVec *temp_iovv = hdtr->headers;
+      int  temp_n    = hdtr->hdr_cnt;
+    off_t  temp_len  = 0;
+    if (spool_iovv(sd, &temp_iovv, &temp_n, &temp_len)) return -1; /* errno OK*/
+    *len += temp_len;
   }
 
+  /* Spool the file via the buffer to the socket:                             */
+  retries = 0;
+  while (len_2_read > 0)
+  { buf_ptr = read(fd, &buffer, (BUF_SZ < len_2_read ? BUF_SZ : len_2_read));
+    if (buf_ptr < 0)  /* The read call failed.                                */
+    { if (errno == EINTR || errno == EAGAIN)  /* Usually transient.           */
+      { if (retries++ < MAX_RETRIES) continue;  /* Try again.                 */
+        else { *len += cumulative;  return -1; }  /* Give up.                 */
+      }
+      else  /* It actually is a failure we can't ignore.                      */
+      { if (errno == EINVAL) errno = EIO;  /* Can't EINVAL here.              */
+        *len += cumulative;  return -1;
+    } }  /* If we've gotten this far, it didn't error out on us!  Yay!        */
+    if (buf_ptr == 0) break;  /* We've hit EOF.                               */
+    /* buf_ptr > 0:  Got data to send.                                        */
+    len_2_read -= buf_ptr;  /* Got this much left to go.                      */
+    result = stubborn_send(buffer, &buf_ptr, sd);
+    if (result == -1) { *len += cumulative;  return -1; }  /* All errors OK.  */
+    cumulative += buf_ptr;
+  }
+  *len += cumulative;
+
   /* Spool any trailers to the socket:                                        */
-  if (hdtr != NULL && hdtr->trailers != NULL && hdtr->trl_cnt > 0)
-    temp = (uint32_t)(hdtr->trl_cnt);             /* This is UNSIGNED dammit. */
-    if (spool_iovv(sd, &(hdtr->trailers), &temp, len)) return -1;
+  if (hdtr && (hdtr->trailers != NULL || hdtr->trlr_cnt != 0))
+  { IOVec *temp_iovv = hdtr->trailers;
+      int  temp_n    = hdtr->trlr_cnt;
+    off_t  temp_len  = 0;
+    if (spool_iovv(sd, &temp_iovv, &temp_n, &temp_len)) return -1; /* errno OK*/
+    *len += temp_len;
+  }
 
   return 0;
-} /* end of sendfile() */
+} /* end of sendfile()                                                        */

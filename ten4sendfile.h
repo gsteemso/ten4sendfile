@@ -27,12 +27,12 @@ typedef struct iovec IOVec;
  * by all rights be invisible because of the undefined constant above (not to *
  * mention that _POSIX_C_SOURCE is probably defined at that point), placing a *
  * copy here nevertheless SOMEHOW yields a duplicate-definition error.  HOW?! */
-#ifdef BUILDING_TEN4SENDFILE
+#ifdef TEN4SENDFILE
 struct sf_hdtr {
     IOVec *headers;   /* Array of header data. */
       int  hdr_cnt;   /* Length of header array. */
     IOVec *trailers;  /* Array of trailer data. */
-      int  trl_cnt;   /* Length of trailer array. */
+      int  trlr_cnt;  /* Length of trailer array. */
 };
 #endif
 typedef struct sf_hdtr Sf_HdTr;
