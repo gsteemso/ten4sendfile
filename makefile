@@ -1,11 +1,16 @@
 # Makefile for ten4sendfile.
 # Written 2025-Jan-11, last edited 2025-Oct-18 by gsteemso.
 
-CC      := cc
-CFLAGS  := -Os
-CP      := cp -p
-MKDIR_P := mkdir -p
-RM      := rm -f
+CC        := cc
+CFLAGS    := -std=gnu99 -Os
+CP        := cp -p
+MKDIR_P   := mkdir -p
+RM        := rm -f
+ifdef W
+warnflags := -Wall -Wextra
+else
+warnflags :=
+endif
 
 prefix     := .
 libdir     := $(prefix)/lib
@@ -31,7 +36,7 @@ dylib_args := -dynamiclib -install_name $(installed_lib) -headerpad_max_install_
 export MACOSX_DEPLOYMENT_TARGET := 10.3
 
 $(built_lib) : $(lib_header) $(lib_source)
-	$(CC) $(CFLAGS) $(dylib_args) -o $(built_lib) $(lib_source)
+	$(CC) $(CFLAGS) $(warnflags) $(dylib_args) -o $(built_lib) $(lib_source)
 
 install : $(built_lib) $(lib_header) $(manpage)
 	@$(MKDIR_P) $(includedir)/sys
