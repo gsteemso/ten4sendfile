@@ -1,6 +1,6 @@
 ﻿TEN4SENDFILE
 
-Written by Gordon Steemson, January 2025
+Written by Gordon Steemson, January 2025 (with corrections that October)
 ⟨gsteemso@gmail.com⟩
 
 On Mac OS 10.3.9 and 10.4.x, Apple included a (wrong) prototype for the
@@ -12,11 +12,12 @@ This tiny library implements the missing function.  It ought to do exactly
 what is described in the Mac OS 10.5 manpage (which is also included in the
 repository, and is installed alongside the library and header file if you use
 the default makefile).  The manpage is unclear on whether the optional leader
-and trailer data should be counted towards the number of bytes written; on the
-basis that you want to know how much of the actual file got sent, I opted to
-not include them in the count.
+and trailer data should be counted towards the number of bytes written, but
+evidence from other implementations suggests “yes”, so I did.
 
 Full instructions on how to use this are available by running `make help`.
 
 In the interests of transparency, please note that I have not done much
-testing of this library.
+testing of this library, though a software package that uses the sendfile
+function did appear to work correctly when compiled against it, according to
+that package’s “make check”.
